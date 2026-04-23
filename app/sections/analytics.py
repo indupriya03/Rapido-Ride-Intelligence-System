@@ -5,7 +5,6 @@
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 import os, sys
@@ -30,10 +29,11 @@ _is_dark = st.session_state.get("theme", "light") == "dark"
 THEME    = DARK_THEME if _is_dark else LIGHT_THEME
 
 # Shorthand for inline HTML colours that adapt to theme
-_card_bg   = THEME["card"]
-_card_bdr  = THEME["border"]
-_text_main = THEME["text"]
+_card_bg    = THEME["card"]
+_card_bdr   = THEME["border"]
+_text_main  = THEME["text"]
 _text_muted = "#7A7A7A" if _is_dark else "#888888"
+_text_sub   = "#B8B8B8" if _is_dark else "#555555"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HEADER
@@ -72,7 +72,7 @@ with tab1:
             pivot = pivot[cols_ordered]
 
         fig_hm = heatmap_chart(pivot, title="", height=480, color_scale="RdYlGn_r")
-        apply_chart_theme(fig_hm, THEME, height=480)
+        fig_hm = apply_chart_theme(fig_hm, THEME, height=480)
         fig_hm.update_xaxes(title="Day of Week")
         fig_hm.update_yaxes(title="Hour of Day", autorange="reversed")
         fig_hm.update_traces(
@@ -80,30 +80,60 @@ with tab1:
         )
         st.plotly_chart(fig_hm, use_container_width=True)
 
-    st.markdown("<div class='section-title'>Model-Predicted Cancel Risk by Hour</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Predicted vs Actual Cancel Rate by Hour</div>", unsafe_allow_html=True)
     cancel_hr_df = run_query(Q3_CANCEL_PROB_BY_HOUR)
+    actual_rate = (cancel_hr_df["actual_cancels"] / cancel_hr_df["total"]) * 100
+    predicted_rate = cancel_hr_df["avg_cancel_prob"] * 100
     fig_chr = go.Figure()
     fig_chr.add_trace(go.Bar(
         x=cancel_hr_df["hour_of_day"],
         y=cancel_hr_df["actual_cancels"],
         name="Actual Cancels",
         marker_color="#FF4B4B", opacity=0.7,
+        yaxis="y"
     ))
     fig_chr.add_trace(go.Scatter(
         x=cancel_hr_df["hour_of_day"],
-        y=cancel_hr_df["avg_cancel_prob"] * cancel_hr_df["total"],
-        name="Model-Predicted Cancels",
+        y=actual_rate,
+        name="Actual Cancel Rate (%)",
+        mode="lines+markers",
+        line=dict(color="red", width=2.5),
+        yaxis="y2",
+    ))
+
+    fig_chr.add_trace(go.Scatter(
+        x=cancel_hr_df["hour_of_day"],
+        y=predicted_rate,
+        name="Predicted Cancel Rate (%)",
         mode="lines+markers",
         line=dict(color=RAPIDO_YELLOW, width=2.5),
-        yaxis="y",
+        yaxis="y2"
+        
     ))
-    _themed(fig_chr, 340)
     fig_chr.update_layout(
-        xaxis=dict(title="Hour of Day", gridcolor=THEME["border"], tickmode="linear"),
-        yaxis=dict(title="Cancellation Count", gridcolor=THEME["border"]),
+        xaxis=dict(
+            title="Hour of Day",
+            tickmode="linear",
+            gridcolor=THEME["border"]
+        ),
+        yaxis=dict(
+            title="Cancellation Count",
+            gridcolor=THEME["border"],
+            tickformat="d",
+            rangemode="tozero"
+        ),
+        yaxis2=dict(
+            title="Cancel Rate (%)",
+            overlaying="y",
+            side="right",
+            range=[0, 60],
+            showgrid=False
+        ),
         legend=dict(bgcolor="rgba(0,0,0,0)"),
         margin=dict(l=10, r=10, t=20, b=10),
     )
+    
+    
     st.plotly_chart(fig_chr, use_container_width=True)
 
     col_r1, col_r2 = st.columns(2)
@@ -119,7 +149,7 @@ with tab1:
                 orientation="h",
                 marker_color=RAPIDO_YELLOW,
             ))
-            _themed(fig_reasons, 360)
+            fig_reasons = _themed(fig_reasons, 360)
             fig_reasons.update_layout(
                 xaxis=dict(gridcolor=THEME["border"]),
                 yaxis=dict(gridcolor=THEME["border"]),
@@ -138,7 +168,7 @@ with tab1:
                 marker_colors=[RAPIDO_YELLOW, "#FF4B4B", "#4B9EFF", "#00C48C"],
                 textinfo="percent+label",
             ))
-            _themed(fig_party, 360)
+            fig_party = _themed(fig_party, 360)
             fig_party.update_layout(
                 legend=dict(bgcolor="rgba(0,0,0,0)"),
                 margin=dict(l=10, r=10, t=10, b=10),
@@ -149,14 +179,18 @@ with tab1:
     wknd_df = run_query(Q3_WEEKEND_COMPARISON)
     if not wknd_df.empty:
         wknd_df["label"] = wknd_df["is_weekend"].map({0: "Weekday", 1: "Weekend"})
-        wc1, wc2, wc3 = st.columns(3)
-        for row in wknd_df.itertuples():
-            lbl = row.label
-            col = wc1 if lbl == "Weekday" else wc2
-            col.metric(f"{lbl} — Total Rides",  f"{int(row.total_rides):,}")
-            col.metric(f"{lbl} — Avg Fare",     f"₹{row.avg_fare:,.2f}")
-            col.metric(f"{lbl} — Cancel Rate",  f"{row.cancel_rate_pct:.1f}%")
-            col.metric(f"{lbl} — Avg Surge",    f"{row.avg_surge:.2f}x")
+        display_wknd = wknd_df[["label", "total_rides", "avg_fare", "cancel_rate_pct", "avg_surge"]].copy()
+        display_wknd.columns = ["Period", "Total Rides", "Avg Fare (₹)", "Cancel Rate (%)", "Avg Surge"]
+        st.dataframe(
+            display_wknd.style.format({
+                "Total Rides":       "{:,.0f}",
+                "Avg Fare (₹)":      "₹{:.2f}",
+                "Cancel Rate (%)":   "{:.1f}%",
+                "Avg Surge":         "{:.2f}x",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -172,7 +206,7 @@ with tab2:
             values="avg_surge", fill_value=1.0,
         )
         fig_surge_hm = heatmap_chart(pivot_surge, title="", height=460, color_scale="YlOrRd")
-        apply_chart_theme(fig_surge_hm, THEME, height=460)
+        fig_surge_hm = apply_chart_theme(fig_surge_hm, THEME, height=460)
         fig_surge_hm.update_xaxes(title="City")
         fig_surge_hm.update_yaxes(title="Hour of Day", autorange="reversed")
         fig_surge_hm.update_traces(
@@ -228,24 +262,19 @@ with tab3:
     st.info("📂 Feature importance charts are generated by `model_training.py` and saved to `outputs/`. Load them below or view from the outputs directory.")
 
     fi_paths = {
-        "UC1 — Ride Outcome":     "outputs/uc1_feature_importance.png",
-        "UC2 — Fare Prediction":  "outputs/uc2_feature_importance.png",
-        "UC3 — Cancel Risk":      "outputs/uc3_feature_importance.png",
-        "UC4 — Driver Delay":     "outputs/uc4_feature_importance.png",
+        "UC1 — Ride Outcome":          "outputs/uc1_feature_importance.png",
+        "UC2 Auto — Fare Prediction":  "outputs/uc2_auto_feature_importance.png",
+        "UC2 Cab — Fare Prediction":   "outputs/uc2_cab_feature_importance.png",
+        "UC2 Bike — Fare Prediction":  "outputs/uc2_bike_feature_importance.png",
+        "UC3 — Cancel Risk":           "outputs/uc3_feature_importance.png",
+        "UC4 — Driver Delay":          "outputs/uc4_feature_importance.png",
     }
-    fi_cols = st.columns(2)
-    for i, (label, path) in enumerate(fi_paths.items()):
-        with fi_cols[i % 2]:
-            st.markdown(f"**{label}**")
+    for label, path in fi_paths.items():
+        with st.expander(f"📊 {label}", expanded=False):
             if os.path.exists(path):
-                st.image(path)
+                st.image(path, use_container_width=True)
             else:
-                st.markdown(f"""
-                <div style='background:{_card_bg};border:1px dashed {_card_bdr};border-radius:10px;
-                            padding:24px;text-align:center;color:{_text_muted};font-size:13px;'>
-                  📊 {path}<br><span style='font-size:11px;'>Run model_training.py to generate</span>
-                </div>
-                """, unsafe_allow_html=True)
+                st.caption(f"`{path}` not found — run `model_training.py` to generate.")
 
     st.markdown("<div class='section-title'>Ride Distance vs Cancel Probability</div>", unsafe_allow_html=True)
     dist_df = run_query(Q3_DIST_VS_CANCEL)
@@ -271,8 +300,8 @@ with tab3:
 
     st.markdown("<div class='section-title'>Confusion Matrices</div>", unsafe_allow_html=True)
     cm_paths = {
-        "UC1 Confusion": "outputs/uc1_confusion_matrix.png",
-        "UC3 Confusion": "outputs/uc3_confusion_matrix.png",
+        "UC1 Confusion": "outputs/uc1_tuned_confusion_matrix.png",
+        "UC3 Confusion": "outputs/uc3_tuned_confusion_matrix.png",
     }
     cm_cols = st.columns(2)
     for i, (label, path) in enumerate(cm_paths.items()):

@@ -3,13 +3,10 @@
 # pages/predictions.py — UC2 Fare + UC3 Cancel Risk predictions
 # =============================================================================
 
-from sklearn import base
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
-import joblib, json, os, sys
-
+import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from utils.db     import run_query
 from utils.charts import (
@@ -23,6 +20,7 @@ from utils.queries import (
     Q2_PREDICTION_KPIS, Q2_RISK_TIER_DIST, Q2_ACTIONS_DIST,
     Q2_FARE_ACCURACY_BY_CITY, Q2_RISK_BY_CITY, Q2_CANCEL_PROBA_DIST,
     Q2_HIGH_RISK_SAMPLE, Q2_MODEL_ACCURACY, Q2_FARE_SCATTER,
+    Q2_LIVE_INFERENCE,
 )
 
 # Inherit theme from session state (set in app.py)
@@ -51,7 +49,11 @@ tab1, tab2, tab3 = st.tabs(["📦 Batch Results", "🎯 Live Inference", "📈 M
 # TAB 1 — BATCH RESULTS
 # ═══════════════════════════════════════════════════════════════════════════
 with tab1:
-    kpi = run_query(Q2_PREDICTION_KPIS).iloc[0]
+    @st.cache_data(ttl=300)
+    def load_prediction_kpis():
+        return run_query(Q2_PREDICTION_KPIS).iloc[0]
+
+    kpi = load_prediction_kpis()
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Predictions",   f"{int(kpi.total_predictions):,}")
@@ -96,8 +98,8 @@ with tab1:
             barmode="stack",
             margin=dict(l=10, r=10, t=10, b=10),
             legend=dict(bgcolor="rgba(0,0,0,0)"),
-            xaxis=dict(gridcolor=THEME["border"]),
-            yaxis=dict(gridcolor=THEME["border"]),
+            xaxis=dict(title="Recommended Action", gridcolor=THEME["border"]),
+            yaxis=dict(title="Number of Rides", gridcolor=THEME["border"]),
         )
         st.plotly_chart(fig_act, use_container_width=True)
 
@@ -133,7 +135,7 @@ with tab1:
             index="city", columns="cancel_risk_tier", values="count", fill_value=0
         )
         pivot = pivot.reindex(columns=["High", "Medium", "Low"], fill_value=0)
-        fig_hm   = heatmap_chart(pivot, title="", height=380, color_scale="YlOrRd")
+        fig_hm   = heatmap_chart(pivot, title="", height=380, color_scale="YlOrRd_r")
         fig_hm   = apply_chart_theme(fig_hm, THEME, height=380)
         fig_hm.update_xaxes(title="Risk Tier")
         fig_hm.update_yaxes(title="")
@@ -144,6 +146,7 @@ with tab1:
     st.dataframe(
         hr_df.style.format({
             "cancel_prob_pct": "{:.1f}%",
+            "distance_km":     "{:.1f}",
             "surge": "{:.2f}x",
             "predicted_fare": "₹{:.0f}",
             "actual_fare": "₹{:.0f}",
@@ -156,264 +159,79 @@ with tab1:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TAB 2 — LIVE INFERENCE
+# TAB 2 — LIVE INFERENCE (SQL-based — no hardcoded defaults)
 # ═══════════════════════════════════════════════════════════════════════════
 with tab2:
     st.markdown("<div class='section-title'>Ride Input — UC2 Fare & UC3 Cancel Risk</div>", unsafe_allow_html=True)
+    st.caption("Fetches the closest matching real booking from the predictions table.")
 
-    MODEL_DIR = "models"
-    models_exist = (
-        os.path.exists(f"{MODEL_DIR}/uc2_fare_model.pkl") and
-        os.path.exists(f"{MODEL_DIR}/uc3_cancel_model.pkl") and
-        os.path.exists(f"{MODEL_DIR}/scaler_uc2.pkl") and
-        os.path.exists(f"{MODEL_DIR}/scaler_uc3.pkl")
-    )
-
-    # ── Auto-compute surge based on ride conditions ──
-    def compute_surge(hour, is_weekend, peak, traffic, weather):
-        base = 1.0
-        if 7 <= hour <= 10 or 17 <= hour <= 21:
-            base += 0.4
-        if hour >= 22 or hour <= 5:
-            base += 0.2
-        if is_weekend:
-            base += 0.2
-        if peak:
-            base += 0.3
-        if traffic == "High":
-            base += 0.4
-        elif traffic == "Medium":
-            base += 0.2
-        if weather == "Heavy Rain":
-            base += 0.5
-        elif weather == "Rain":
-            base += 0.3
-        return round(min(base, 3.0), 1)
-    
     col_inp, col_out = st.columns([1, 1.2])
 
     with col_inp:
-        city_sel     = st.selectbox("City",         ["Bangalore", "Delhi", "Mumbai", "Chennai", "Hyderabad"])
-        vehicle_sel  = st.selectbox("Vehicle Type", ["Bike", "Auto", "Cab"])
-        distance_sel = st.slider("Distance (km)",   1.0, 50.0, 10.0, 0.5)
-        hour_sel     = st.slider("Hour of Day",     0,   23,   9)
-        weekend_sel  = st.checkbox("Is Weekend?")
-        peak_sel     = st.checkbox("Peak Time?")
+        city_sel     = st.selectbox("City",          ["Bangalore", "Delhi", "Mumbai", "Chennai", "Hyderabad"])
+        vehicle_sel  = st.selectbox("Vehicle Type",  ["Bike", "Auto", "Cab"])
+        distance_sel = st.slider("Distance (km)",    1.0, 50.0, 10.0, 0.5)
+        hour_sel     = st.slider("Hour of Day",      0, 23, 9)
         traffic_sel  = st.selectbox("Traffic Level", ["Low", "Medium", "High"])
         weather_sel  = st.selectbox("Weather",       ["Clear", "Rain", "Heavy Rain"])
-        surge_sel = compute_surge(hour_sel, weekend_sel, peak_sel, traffic_sel, weather_sel)
-        st.info(f"⚡ Auto-computed Surge: **{surge_sel}x**")
         predict_btn  = st.button("⚡ Predict", use_container_width=True)
-
-
 
     with col_out:
         if predict_btn:
-            if models_exist:
-                try:
-                    # ── Load models + scalers + threshold ──
-                    uc2_model  = joblib.load(f"{MODEL_DIR}/uc2_fare_model.pkl")
-                    uc3_model  = joblib.load(f"{MODEL_DIR}/uc3_cancel_model.pkl")
-                    scaler_uc2 = joblib.load(f"{MODEL_DIR}/scaler_uc2.pkl")
-                    scaler_uc3 = joblib.load(f"{MODEL_DIR}/scaler_uc3.pkl")
-                    with open(f"{MODEL_DIR}/thresholds.json") as f:
-                        thresh = json.load(f).get("uc3_threshold", 0.5)
+            result = run_query(
+                Q2_LIVE_INFERENCE,
+                params={
+                    "city":             city_sel,
+                    "vehicle_type":     vehicle_sel,
+                    "hour_of_day":      hour_sel,
+                    "traffic_level":    traffic_sel,
+                    "weather_condition": weather_sel,
+                    "distance_km":      distance_sel,
+                }
+            )
 
-                    # ── Derived inputs ──
-                    traffic_map  = {"Low": 1, "Medium": 2, "High": 3}
-                    weather_map  = {"Clear": 0, "Rain": 1, "Heavy Rain": 2}
-                    traffic_num  = traffic_map[traffic_sel]
-                    weather_num  = weather_map[weather_sel]
-                    est_ride_time = distance_sel * 3.0   # ~3 min/km heuristic
-
-                    # ── Build raw feature dict ──
-                    raw = {
-                        # Core inputs
-                        "ride_distance_km":             distance_sel,
-                        "surge_multiplier":             surge_sel,
-                        "estimated_ride_time_min":      est_ride_time,
-                        "hour_of_day":                  hour_sel,
-                        "is_weekend":                   int(weekend_sel),
-                        "peak_time_flag":               int(peak_sel),
-                        "is_night_ride":                int(hour_sel >= 22 or hour_sel <= 5),
-                        "is_morning_peak":              int(7 <= hour_sel <= 10),
-                        "is_evening_peak":              int(17 <= hour_sel <= 21),
-                        # Encoded fields
-                        "traffic_enc":                  traffic_num - 1,   # 0/1/2
-                        "weather_enc":                  weather_num,
-                        "demand_enc":                   1,                 # assume Medium
-                        "traffic_num":                  traffic_num,
-                        "weather_num":                  weather_num,
-                        # Interaction features (raw — not in SCALE_COLS)
-                        "surge_x_distance":             surge_sel * distance_sel,
-                        "surge_x_traffic":              surge_sel * traffic_num,
-                        "peak_x_surge":                 int(peak_sel) * surge_sel,
-                        "traffic_x_ridetime":           traffic_num * est_ride_time,
-                        "weather_x_ridetime":           weather_num * est_ride_time,
-                        "rain_high_traffic":            int(weather_sel in ["Rain","Heavy Rain"] and traffic_sel == "High"),
-                        "high_delay_high_traffic":      int(traffic_sel == "High"),
-                        "holiday_x_peak":               0,
-                        "night_x_high_traffic":         int((hour_sel >= 22 or hour_sel <= 5) and traffic_sel == "High"),
-                        "peak_x_distance":              int(peak_sel) * distance_sel,
-                        # Distance flags (use fixed thresholds — same as Zone 3 approx)
-                        "is_short_ride":                int(distance_sel < 5),
-                        "is_long_ride":                 int(distance_sel > 20),
-                        "distance_bin_enc":             2 if distance_sel > 20 else (0 if distance_sel < 5 else 1),
-                        # Vehicle type one-hot
-                        "vehicle_type_Cab":             int(vehicle_sel == "Cab"),
-                        "vehicle_type_Bike":            int(vehicle_sel == "Bike"),
-                        # City one-hot
-                        "city_Delhi":                   int(city_sel == "Delhi"),
-                        "city_Mumbai":                  int(city_sel == "Mumbai"),
-                        "city_Chennai":                 int(city_sel == "Chennai"),
-                        "city_Hyderabad":               int(city_sel == "Hyderabad"),
-                        # Driver defaults (median values — better than 0)
-                        "acceptance_rate":              0.85,
-                        "delay_rate":                   0.05,
-                        "avg_driver_rating":            4.2,
-                        "driver_reliability_score":     0.80,
-                        "avg_pickup_delay_min":         3.0,
-                        "rejection_rate":               0.10,
-                        "driver_incomplete_rate":       0.05,
-                        "delay_per_ride":               0.05,
-                        "delay_per_km":                 0.01,
-                        "delay_count":                  2,
-                        "total_assigned_rides":         150,
-                        "accepted_rides":               128,
-                        "driver_incomplete_rides":      6,
-                        "driver_experience_years":      4.0,
-                        "driver_age":                   32,
-                        "avg_driver_rating":            4.2,
-                        "driver_experience_enc":        1,
-                        "driver_acceptance_enc":        2,
-                        "is_unreliable_driver":         0,
-                        "is_low_rated_driver":          0,
-                        "experience_outlier_flag":      0,
-                        # Customer defaults
-                        "customer_age":                 30,
-                        "customer_signup_days_ago":     365,
-                        "customer_tenure_years":        1.0,
-                        "is_new_customer":              0,
-                        "avg_customer_rating":          4.0,
-                        "total_bookings":               15,
-                        "completed_rides":              12,
-                        "cancelled_rides":              2,
-                        "incomplete_rides":             1,
-                        "cancellation_rate":            0.13,
-                        "cancel_to_booking_ratio":      0.13,
-                        "cust_completion_rate":         0.80,
-                        "incomplete_ride_share":        0.07,
-                        "is_low_rated_customer":        0,
-                        "is_high_cancel_customer":      0,
-                        "vehicle_preference_match":     1,
-                        "cancel_risk_score":            0.10,
-                        "Customer_Loyalty_Score":       0.75,
-                        "loyalty_x_cancel":             0.10,
-                        # Location defaults
-                        "loc_total_requests":           500,
-                        "loc_completed_rides":          380,
-                        "loc_cancelled_rides":          80,
-                        "avg_wait_time_min":            5.0,
-                        "avg_surge_multiplier":         surge_sel,
-                        "location_surge_deviation":     0.0,
-                        "is_high_demand_location":      0,
-                        "demand_supply_ratio":          1.0,
-                        # Derived ride features
-                        "fare_per_km":                  surge_sel * 12,
-                        "fare_per_min":                 surge_sel * 4,
-                        "base_fare":                    distance_sel * 12,
-                        "base_fare_per_km":             12.0,
-                        "expected_fare":                distance_sel * 12 * surge_sel,
-                        "surge_impact":                 distance_sel * 12 * (surge_sel - 1),
-                        "base_x_surge":                 distance_sel * 12 * surge_sel,
-                        "fare_per_km_per_surge":        12.0,
-                        "fare_above_loc_avg":           int(surge_sel > 1.5),
-                        "reliability_x_distance":       0.80 * distance_sel,
-                        "delay_x_traffic":              0.05 * traffic_num,
-                        "cancel_risk_x_peak":           0.13 * int(peak_sel),
-                        "cancel_risk_x_night":          0.13 * int(hour_sel >= 22 or hour_sel <= 5),
-                        "demand_x_incomplete_rate":     1 * 0.05,
-                        "time_pressure":                est_ride_time / 6.0,
-                        "exp_x_distance":               4.0 * distance_sel,
-                        "ride_difficulty":              0,
-                        "distance_x_traffic":           distance_sel * (traffic_num - 1),
-                        "dual_low_rating":              0,
-                        "new_cust_x_unreliable":        0,
-                        # Cyclical time
-                        "hour_sin":                     np.sin(2 * np.pi * hour_sel / 24),
-                        "hour_cos":                     np.cos(2 * np.pi * hour_sel / 24),
-                        "is_holiday":                   0,
-                        "peak_x_distance":              int(peak_sel) * distance_sel,
-                    }
-
-                    # ── Align to model feature columns ──
-                    uc2_cols = list(uc2_model.feature_names_in_)
-                    uc3_cols = list(uc3_model.feature_names_in_)
-
-                    def build_X(cols, raw_dict):
-                        row = {c: raw_dict.get(c, 0) for c in cols}
-                        return pd.DataFrame([row])[cols].astype(float)
-
-                    X_uc2_raw = build_X(uc2_cols, raw)
-                    X_uc3_raw = build_X(uc3_cols, raw)
-
-                    # ── Apply scaler to columns it was fit on ──
-                    SCALE_COLS = [
-                        'surge_multiplier', 'estimated_ride_time_min',
-                        'acceptance_rate', 'delay_rate', 'avg_pickup_delay_min',
-                        'customer_age', 'customer_tenure_years', 'customer_signup_days_ago',
-                        'fare_per_km', 'fare_per_min',
-                        'driver_reliability_score', 'demand_supply_ratio',
-                        'cancel_to_booking_ratio', 'cust_completion_rate',
-                        'rejection_rate', 'delay_per_ride', 'driver_incomplete_rate',
-                        'location_surge_deviation', 'surge_x_distance',
-                        'traffic_x_ridetime', 'reliability_x_distance',
-                        'ride_distance_km', 'base_fare',
-                    ]
-
-                    def apply_scaler(X, scaler, scale_cols):
-                        cols_present = [c for c in scale_cols if c in X.columns]
-                        if cols_present:
-                            X = X.copy()
-                            X[cols_present] = scaler.transform(X[cols_present])
-                        return X
-
-                    X_uc2 = apply_scaler(X_uc2_raw, scaler_uc2, SCALE_COLS)
-                    X_uc3 = apply_scaler(X_uc3_raw, scaler_uc3, SCALE_COLS)
-
-                    # ── Predict ──
-                    fare_log  = uc2_model.predict(X_uc2)[0]
-                    fare_pred = float(np.expm1(fare_log))
-                    cancel_p  = float(uc3_model.predict_proba(X_uc3)[0, 1])
-
-                    tier   = "High" if cancel_p >= 0.7 else "Medium" if cancel_p >= 0.4 else "Low"
-                    action = {"High": "Reassign Driver", "Medium": "Send Reminder", "Low": "Proceed"}[tier]
-
-                    st.plotly_chart(risk_gauge(cancel_p, "Cancellation Risk"), use_container_width=True)
-
-                    tier_badge = f"<span class='badge-{tier.lower()}'>{tier} Risk</span>"
-                    st.markdown(f"""
-                    <div style='background:{_card_bg};border:1px solid {_card_bdr};border-radius:12px;padding:20px;'>
-                      <div style='font-size:13px;color:{_text_muted};margin-bottom:4px;'>PREDICTED FARE</div>
-                      <div style='font-size:36px;font-weight:700;color:{_accent};'>₹{fare_pred:,.0f}</div>
-                      <div style='font-size:12px;color:{_text_muted};margin-top:4px;'>
-                        Base est: ₹{(distance_sel * 12):,.0f} · Surge ×{surge_sel}
-                      </div>
-                      <hr style='border-color:{_card_bdr};margin:14px 0;'>
-                      <div style='font-size:13px;color:{_text_muted};margin-bottom:6px;'>CANCEL RISK</div>
-                      {tier_badge}
-                      <div style='font-size:20px;font-weight:600;margin:8px 0;color:{_text_main};'>{cancel_p*100:.1f}%</div>
-                      <div style='font-size:13px;color:{_text_muted};'>Threshold: {thresh:.3f} · Recommended: <b style='color:{_text_main};'>{action}</b></div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                except Exception as e:
-                    st.error(f"Inference error: {e}")
-                    st.exception(e)
-
+            if result.empty:
+                st.warning(
+                    "No matching booking found for this combination. "
+                    "Try adjusting the distance, hour, or traffic level."
+                )
             else:
-                st.warning("Model files not found. Ensure `insert_predictions.py` has been run first.", icon="⚠️")
+                row = result.iloc[0]
+                if int(row["matched_bookings"]) < 5:
+                    st.warning(
+                        f"Only {int(row['matched_bookings'])} matching bookings found — "
+                        "result may not be representative. Try widening the distance or hour."
+                    )
+                tier   = row["cancel_risk_tier"]
+                cancel_p = float(row["cancel_probability_raw"])
 
+                st.plotly_chart(
+                    risk_gauge(cancel_p, "Cancellation Risk", theme=THEME),
+                    use_container_width=True
+                )
+
+                tier_badge = f"<span class='badge-{tier.lower()}'>{tier} Risk</span>"
+                st.markdown(f"""
+                <div style='background:{_card_bg};border:1px solid {_card_bdr};border-radius:12px;padding:20px;'>
+                  <div style='font-size:13px;color:{_text_muted};margin-bottom:4px;'>PREDICTED FARE</div>
+                  <div style='font-size:36px;font-weight:700;color:{_accent};'>₹{row['predicted_fare']:,.0f}</div>
+                  <div style='font-size:12px;color:{_text_muted};margin-top:4px;'>
+                    Surge ×{row['surge_multiplier']} · {row['vehicle_type']} · {row['ride_distance_km']} km
+                  </div>
+                  <hr style='border-color:{_card_bdr};margin:14px 0;'>
+                  <div style='font-size:13px;color:{_text_muted};margin-bottom:6px;'>CANCEL RISK</div>
+                  {tier_badge}
+                  <div style='font-size:20px;font-weight:600;margin:8px 0;color:{_text_main};'>{row['cancel_probability_pct']:.1f}%</div>
+                  <div style='font-size:13px;color:{_text_muted};'>
+                    Threshold: {row['uc3_threshold_used']:.3f} ·
+                    Recommended: <b style='color:{_text_main};'>{row['recommended_action']}</b>
+                  </div>
+                  <hr style='border-color:{_card_bdr};margin:14px 0;'>
+                  <div style='font-size:12px;color:{_text_muted};'>
+                    Based on {int(row['matched_bookings']):,} similar historical bookings
+                  </div>
+                </div>
+                """, unsafe_allow_html=True)
         else:
             st.markdown(f"""
             <div style='background:{_card_bg};border:1px dashed {_card_bdr};border-radius:12px;
@@ -423,10 +241,14 @@ with tab2:
             </div>
             """, unsafe_allow_html=True)
 
+
 # ═══════════════════════════════════════════════════════════════════════════
 # TAB 3 — MODEL PERFORMANCE
 # ═══════════════════════════════════════════════════════════════════════════
 with tab3:
+
+    st.markdown("")
+
     st.markdown("<div class='section-title'>UC2 — Fare Model Accuracy</div>", unsafe_allow_html=True)
 
     col_p1, col_p2 = st.columns(2)
@@ -475,7 +297,7 @@ with tab3:
     st.markdown("<div class='section-title'>Predicted vs Actual Fare Scatter (UC2)</div>", unsafe_allow_html=True)
     scatter_df = run_query(Q2_FARE_SCATTER)
     if not scatter_df.empty:
-        fig_scatter = fare_vs_actual_scatter(scatter_df)
+        fig_scatter = fare_vs_actual_scatter(scatter_df, theme=THEME)
         fig_scatter  = apply_chart_theme(fig_scatter, THEME, height=400)
         st.plotly_chart(fig_scatter, use_container_width=True)
 
