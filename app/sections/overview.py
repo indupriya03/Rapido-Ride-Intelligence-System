@@ -113,21 +113,19 @@ cancelled        = (filtered['booking_status'] == 'Cancelled').sum()
 cancel_rate      = (cancelled / total_rides * 100) if total_rides > 0 else 0
 avg_fare         = filtered['booking_value'].mean()
 avg_surge        = filtered['surge_multiplier'].mean()
-avg_delay        = filtered['avg_pickup_delay_min'].mean()
-high_risk_count  = cancelled  # proxy
+avg_delay        = filtered['avg_pickup_delay_min'].fillna(0).mean()
 
 col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
     st.metric("Total Rides", f"{total_rides:,}")
 with col2:
-    st.metric("Completed", f"{completed:,}",
-              delta=f"{completed/total_rides*100:.1f}%" if total_rides else "0%")
-with col3:
     st.metric("Cancellation Rate", f"{cancel_rate:.1f}%",
               delta=f"{cancelled:,} rides", delta_color="inverse")
-with col4:
+with col3:
     st.metric("Avg Fare (₹)", f"₹{avg_fare:.0f}")
+with col4:
+    st.metric("Avg Delay (min)", f"{avg_delay:.1f}" if pd.notna(avg_delay) else "N/A")
 with col5:
     st.metric("Avg Surge", f"{avg_surge:.2f}x")
 
@@ -139,25 +137,32 @@ st.divider()
 col_left, col_right = st.columns(2)
 
 with col_left:
-    st.subheader("Rides by city")
-    city_counts = (
-        filtered.groupby('city')['booking_id']
-        .count().reset_index()
-        .rename(columns={'booking_id': 'rides'})
-        .sort_values('rides', ascending=False)
+    st.subheader("Cancellation rate by city")
+    city_cancel = (
+        filtered.groupby('city').apply(
+            lambda x: pd.Series({
+                'cancel_rate': (x['booking_status'] == 'Cancelled').sum() / len(x) * 100,
+                'total_rides': len(x)
+            })
+        ).reset_index().sort_values('cancel_rate', ascending=True)
     )
     fig_city = px.bar(
-        city_counts, x='city', y='rides',
-        color='city',
-        color_discrete_sequence=px.colors.qualitative.Set2,
-        labels={'city': 'City', 'rides': 'Total Rides'},
+        city_cancel, x='cancel_rate', y='city',
+        orientation='h',
+        color='cancel_rate',
+        color_continuous_scale='RdYlGn_r',
+        labels={'cancel_rate': 'Cancellation Rate (%)', 'city': 'City'},
+        text=city_cancel['cancel_rate'].apply(lambda x: f"{x:.1f}%"),
     )
+    fig_city.update_traces(textposition='outside')
     fig_city.update_layout(
         showlegend=False,
+        coloraxis_showscale=False,
         plot_bgcolor='rgba(0,0,0,0)',
         paper_bgcolor='rgba(0,0,0,0)',
-        margin=dict(t=20, b=20),
+        margin=dict(t=20, b=20, r=60),
         height=320,
+        xaxis=dict(range=[0, city_cancel['cancel_rate'].max() * 1.2])
     )
     st.plotly_chart(fig_city, use_container_width=True)
 
@@ -222,7 +227,7 @@ fig_hourly.update_layout(
     legend=dict(orientation='h', y=1.1),
     margin=dict(t=20, b=20),
     height=350,
-    xaxis=dict(tickmode='linear', tick0=0, dtick=1),
+    xaxis=dict(tickmode='linear', tick0=0, dtick=1, range=[0, 23]),
 )
 st.plotly_chart(fig_hourly, use_container_width=True)
 

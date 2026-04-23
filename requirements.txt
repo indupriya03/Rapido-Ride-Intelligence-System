@@ -6,7 +6,9 @@ seaborn
 xgboost
 lightgbm
 streamlit
-fastapi
-uvicorn
 jupyter
 optuna
+sqlalchemy
+joblib
+shap
+imbalanced-learn

@@ -124,7 +124,8 @@ def pie_chart(df, names, values, title="", height=340):
     return apply_theme(fig, title, height)
 
 
-def heatmap_chart(df_pivot, title="", height=420, color_scale="YlOrRd"):
+def heatmap_chart(df_pivot, title="", height=420, color_scale="YlOrRd", theme: dict = None):
+    text_color = theme["text"] if theme else RAPIDO_TEXT
     fig = go.Figure(go.Heatmap(
         z=df_pivot.values,
         x=list(df_pivot.columns),
@@ -132,32 +133,44 @@ def heatmap_chart(df_pivot, title="", height=420, color_scale="YlOrRd"):
         colorscale=color_scale,
         showscale=True,
         hoverongaps=False,
-        colorbar=dict(tickfont=dict(color=RAPIDO_TEXT)),
+        colorbar=dict(tickfont=dict(color=text_color)),
     ))
+    if theme:
+        return apply_chart_theme(fig, theme, title, height)
     return apply_theme(fig, title, height)
 
 
-def risk_gauge(probability: float, title: str = "Cancel Risk") -> go.Figure:
-    """Semi-circle gauge for a single cancel probability."""
+def risk_gauge(probability: float, title: str = "Cancel Risk", theme: dict = None) -> go.Figure:
+    """Semi-circle gauge for a single cancel probability. Pass theme dict for light/dark support."""
     color = (
         RISK_COLORS["High"]   if probability >= 0.7 else
         RISK_COLORS["Medium"] if probability >= 0.4 else
         RISK_COLORS["Low"]
     )
+    bg_color     = theme["bg"]     if theme else RAPIDO_SURFACE
+    border_color = theme["border"] if theme else RAPIDO_BORDER
+    text_color   = theme["text"]   if theme else RAPIDO_TEXT
+    is_dark      = (theme.get("plotly_template") == "plotly_dark") if theme else True
+
+    step_colors = (
+        ["#1A2E1A", "#2E2A14", "#2E1414"] if is_dark
+        else ["#D4EDDA", "#FFF3CD", "#F8D7DA"]
+    )
+
     fig = go.Figure(go.Indicator(
         mode="gauge+number+delta",
         value=round(probability * 100, 1),
         number=dict(suffix="%", font=dict(size=36, color=color)),
-        title=dict(text=title, font=dict(size=14, color=RAPIDO_TEXT)),
+        title=dict(text=title, font=dict(size=14, color=text_color)),
         gauge=dict(
             axis=dict(range=[0, 100], tickwidth=1, tickcolor=RAPIDO_MUTED),
             bar=dict(color=color, thickness=0.25),
-            bgcolor=RAPIDO_SURFACE,
-            bordercolor=RAPIDO_BORDER,
+            bgcolor=bg_color,
+            bordercolor=border_color,
             steps=[
-                dict(range=[0,  40], color="#1A2E1A"),
-                dict(range=[40, 70], color="#2E2A14"),
-                dict(range=[70,100], color="#2E1414"),
+                dict(range=[0,  40], color=step_colors[0]),
+                dict(range=[40, 70], color=step_colors[1]),
+                dict(range=[70,100], color=step_colors[2]),
             ],
             threshold=dict(
                 line=dict(color=color, width=4),
@@ -166,11 +179,18 @@ def risk_gauge(probability: float, title: str = "Cancel Risk") -> go.Figure:
             ),
         ),
     ))
-    fig.update_layout(**PLOTLY_THEME, height=260)
+    fig.update_layout(
+        template="plotly_dark" if is_dark else "plotly_white",
+        paper_bgcolor=bg_color,
+        plot_bgcolor=bg_color,
+        font=dict(family="'DM Sans', sans-serif", color=text_color),
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=260,
+    )
     return fig
 
 
-def fare_vs_actual_scatter(df: pd.DataFrame) -> go.Figure:
+def fare_vs_actual_scatter(df: pd.DataFrame, theme: dict = None) -> go.Figure:
     """Predicted vs Actual fare scatter with perfect-fit line."""
     max_val = max(df["actual_fare"].max(), df["predicted_fare"].max())
     fig = go.Figure()
@@ -190,11 +210,16 @@ def fare_vs_actual_scatter(df: pd.DataFrame) -> go.Figure:
         name="Predictions",
         hovertemplate="Actual: %{x:.0f}<br>Predicted: %{y:.0f}<extra></extra>",
     ))
+    if theme:
+        fig = apply_chart_theme(fig, theme, title="Predicted vs Actual Fare (UC2)", height=400)
+    else:
+        fig.update_layout(
+            **PLOTLY_THEME,
+            title="Predicted vs Actual Fare (UC2)",
+            height=400,
+        )
     fig.update_layout(
-        **PLOTLY_THEME,
-        title="Predicted vs Actual Fare (UC2)",
         xaxis_title="Actual Fare (₹)",
         yaxis_title="Predicted Fare (₹)",
-        height=400,
     )
     return fig

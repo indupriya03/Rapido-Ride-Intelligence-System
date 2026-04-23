@@ -1,3 +1,16 @@
+# =============================================================================
+# src/data_loader.py
+# =============================================================================
+# Loads all 5 cleaned source tables from CSV files.
+# Returns them as a tuple of DataFrames ready for Zone 1 engineering.
+#
+# Expected files (relative to project root):
+#   data/bookings.csv
+#   data/customers.csv
+#   data/drivers.csv
+#   data/location_demand.csv
+#   data/time_features.csv
+# =============================================================================
 import pandas as pd
 import os
 
@@ -81,3 +94,61 @@ def load_cleaned_data():
     time_features = pd.read_csv(os.path.join(data_dir, "time_features_cleaned.csv"))
 
     return bookings, customers, drivers, location_demand, time_features
+
+
+
+
+
+
+
+
+
+
+
+# import os
+# import pandas as pd
+
+# DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
+
+
+# def load_cleaned_data(data_dir: str = DATA_DIR):
+#     """
+#     Load all 5 cleaned source tables.
+
+#     Returns
+#     -------
+#     bookings_df, customers_df, drivers_df, location_demand_df, time_features_df
+#         Each as a pd.DataFrame.
+#     """
+#     data_dir = os.path.abspath(data_dir)
+
+#     paths = {
+#         'bookings'        : os.path.join(data_dir, 'bookings.csv'),
+#         'customers'       : os.path.join(data_dir, 'customers.csv'),
+#         'drivers'         : os.path.join(data_dir, 'drivers.csv'),
+#         'location_demand' : os.path.join(data_dir, 'location_demand.csv'),
+#         'time_features'   : os.path.join(data_dir, 'time_features.csv'),
+#     }
+
+#     missing = [name for name, path in paths.items() if not os.path.exists(path)]
+#     if missing:
+#         raise FileNotFoundError(
+#             f"Missing data files: {missing}\n"
+#             f"Expected in: {data_dir}"
+#         )
+
+#     print("Loading data...")
+#     bookings_df        = pd.read_csv(paths['bookings'],        parse_dates=['booking_datetime'])
+#     customers_df       = pd.read_csv(paths['customers'])
+#     drivers_df         = pd.read_csv(paths['drivers'])
+#     location_demand_df = pd.read_csv(paths['location_demand'])
+#     time_features_df   = pd.read_csv(paths['time_features'],   parse_dates=['datetime'])
+
+#     print(f"  bookings        : {bookings_df.shape}")
+#     print(f"  customers       : {customers_df.shape}")
+#     print(f"  drivers         : {drivers_df.shape}")
+#     print(f"  location_demand : {location_demand_df.shape}")
+#     print(f"  time_features   : {time_features_df.shape}")
+#     print("✅ All tables loaded.\n")
+
+#     return bookings_df, customers_df, drivers_df, location_demand_df, time_features_df

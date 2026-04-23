@@ -2,3 +2,24 @@ __pycache__/
 *.pyc
 data/cleaned/
 images/overall/
+# virtual environments
+ds1/
+venv/
+env/
+.venv/
+outputs/
+splits/
+.DS_Store
+Thumbs.db
+# IDE
+.vscode/
+# Logs
+*.log
+.ipynb_checkpoints/
+.streamlit/
+models/*_baseline.pkl
+models/*_tuned.pkl
+
+corr_report_*
+shap_importance_*
+shap_report_*

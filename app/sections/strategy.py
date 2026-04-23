@@ -5,7 +5,6 @@
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 import os, sys
@@ -110,29 +109,38 @@ with tab1:
 
         st.markdown("")
 
-        for _, row in alerts_df.iterrows():
-            level = row["alert_level"]
-            if "CRITICAL" in level:
-                css_class, icon = "alert-critical", "🔴"
-            elif "WARNING" in level:
-                css_class, icon = "alert-warning", "🟡"
-            else:
-                css_class, icon = "alert-info", "🔵"
+        # ── Render each alert level as a scrollable dataframe ────────────────
+        DISPLAY_COLS = ["city", "hour_of_day", "vehicle_type", "ride_count",
+                        "high_risk_count", "high_risk_pct", "avg_surge", "pre_position_by"]
+        COL_FMT = {
+            "high_risk_pct": "{:.0f}%",
+            "avg_surge":     "{:.2f}x",
+            "ride_count":    "{:.0f}",
+            "high_risk_count": "{:.0f}",
+        }
 
-            pre_pos = row.get("pre_position_by", "—")
-            st.markdown(f"""
-            <div class='{css_class}'>
-              <div style='font-size:13px;font-weight:700;margin-bottom:4px;'>{icon} {level}</div>
-              <div style='font-size:13px;color:{_text_sub};'>
-                <b>{row['city']}</b> · Hour {int(row['hour_of_day']):02d}:00
-                · {row['vehicle_type']}
-                · {int(row['ride_count'])} rides
-                · {int(row['high_risk_count'])} high-risk ({row['high_risk_pct']:.0f}%)
-                · Avg Surge <b>{row['avg_surge']:.2f}x</b>
-                · Pre-position by <b>{pre_pos}</b>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+        for level_label, level_df, icon, color in [
+            ("🔴 Critical Alerts", critical, "🔴", "#FF4B4B"),
+            ("🟡 Warnings",        warning,  "🟡", "#FFB400"),
+            ("🔵 Info Alerts",     info,     "🔵", "#4B9EFF"),
+        ]:
+            if level_df.empty:
+                continue
+            st.markdown(
+                f"<div style='font-size:13px;font-weight:700;color:{color};"
+                f"margin:12px 0 4px;'>{level_label} ({len(level_df)})</div>",
+                unsafe_allow_html=True,
+            )
+            display_df = level_df[[c for c in DISPLAY_COLS if c in level_df.columns]].copy()
+            display_df["hour_of_day"] = display_df["hour_of_day"].apply(lambda h: f"{int(h):02d}:00")
+            st.dataframe(
+                display_df.style.format(
+                    {k: v for k, v in COL_FMT.items() if k in display_df.columns}
+                ),
+                use_container_width=True,
+                hide_index=True,
+                height=220,   # ~5 rows visible; vertical scrollbar appears automatically
+            )
 
     st.markdown("")
     st.markdown("<div class='section-title'>Surge Pricing Recommendations</div>",
@@ -151,6 +159,8 @@ with tab1:
                 .format({
                     "avg_surge":       "{:.2f}x",
                     "cancel_rate_pct": "{:.1f}%",
+                    "cancellations":   "{:.0f}",
+                    "total_rides":     "{:.0f}",
                 })
                 .applymap(color_rec, subset=["recommendation"]),
             use_container_width=True,
@@ -173,28 +183,6 @@ with tab2:
     understaff_df  = run_query(Q4_UNDERSTAFFED_SLOTS)
     perf_df        = run_query(Q4_DRIVER_PERFORMANCE)
 
-    # ── KPI summary row ─────────────────────────────────────────────────────
-    st.markdown("<div class='section-title'>Fleet Snapshot</div>",
-                unsafe_allow_html=True)
-
-    k1, k2, k3, k4, k5 = st.columns(5)
-
-    if not demand_df.empty:
-        understaffed_count = (demand_df["allocation_status"] == "Understaffed").sum()
-        stretched_count    = (demand_df["allocation_status"] == "Stretched").sum()
-        k1.metric("🔴 Understaffed Slots", int(understaffed_count))
-        k2.metric("🟡 Stretched Slots",    int(stretched_count))
-
-    if not efficiency_df.empty:
-        elite_n   = (efficiency_df["driver_tier"] == "Elite").sum()
-        atrisk_n  = (efficiency_df["driver_tier"] == "At Risk").sum()
-        k3.metric("⭐ Elite Drivers",   int(elite_n))
-        k4.metric("⚠️ At-Risk Drivers", int(atrisk_n))
-
-    if not reassign_df.empty:
-        k5.metric("🔄 Reassign Queue", len(reassign_df))
-
-    st.markdown("---")
 
     # ════════════════════════════════════════════════════════════════════════
     # SECTION A — Demand Heatmap
@@ -451,7 +439,8 @@ with tab2:
         )
         fig_eff = _themed(fig_eff, 440)
         fig_eff.update_layout(
-            xaxis=dict(gridcolor=THEME["border"], range=[0, 105]),
+            xaxis=dict(gridcolor=THEME["border"], range=[55, 105],
+                       title="Completion Rate (%) — active drivers only"),
             yaxis=dict(gridcolor=THEME["border"]),
             legend=dict(bgcolor="rgba(0,0,0,0)"),
             margin=dict(l=10, r=10, t=20, b=10),
@@ -533,28 +522,30 @@ with tab2:
         col_f1, col_f2 = st.columns([3, 1])
 
         with col_f1:
-            bar_colors = [
-                TIER_COLOR.get(t, RAPIDO_MUTED)
-                for t in perf_df["driver_tier"][:20]
-            ]
-            fig_perf = go.Figure(go.Bar(
-                x=perf_df["driver_id"][:20],
-                y=perf_df["performance_score"][:20],
-                marker_color=bar_colors,
-                text=perf_df["performance_score"][:20].apply(lambda x: f"{x:.2f}"),
-                textposition="outside",
-                customdata=perf_df["driver_tier"][:20],
-                hovertemplate=(
-                    "Driver: %{x}<br>Score: %{y:.3f}<br>Tier: %{customdata}<extra></extra>"
-                ),
+            # Show score distribution histogram instead of top-20 identical bars
+            fig_perf = go.Figure(go.Histogram(
+                x=perf_df["performance_score"],
+                nbinsx=20,
+                marker_color=RAPIDO_YELLOW,
+                opacity=0.85,
+                hovertemplate="Score: %{x:.2f}<br>Drivers: %{y}<extra></extra>",
             ))
+            # Add tier threshold lines
+            for score, label, color in [
+                (0.80, "Elite ≥ 0.80",      RAPIDO_YELLOW),
+                (0.60, "Reliable ≥ 0.60",   "#00C48C"),
+                (0.40, "Developing ≥ 0.40", "#FFB400"),
+            ]:
+                fig_perf.add_vline(
+                    x=score, line_dash="dash", line_color=color,
+                    annotation_text=label,
+                    annotation_font_color=color,
+                )
             fig_perf = _themed(fig_perf, 380)
             fig_perf.update_layout(
-                xaxis=dict(title="Driver ID", gridcolor=THEME["border"],
-                           tickangle=-45, tickfont=dict(size=10)),
-                yaxis=dict(title="Performance Score", gridcolor=THEME["border"],
-                           range=[0, 1.1]),
-                margin=dict(l=10, r=10, t=20, b=80),
+                xaxis=dict(title="Performance Score", gridcolor=THEME["border"], range=[0, 1.05]),
+                yaxis=dict(title="Number of Drivers", gridcolor=THEME["border"]),
+                margin=dict(l=10, r=10, t=20, b=10),
             )
             st.plotly_chart(fig_perf, use_container_width=True)
 

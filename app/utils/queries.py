@@ -262,6 +262,47 @@ Q2_FARE_SCATTER = """
 """
 
 
+# Live inference — averages over all matching bookings in the predictions table
+# instead of returning one random booking (which gave unstable results).
+# Derives cancel_risk_tier from the averaged probability so the tier is
+# statistically meaningful rather than reflecting a single booking's outcome.
+Q2_LIVE_INFERENCE = """
+    SELECT
+        p.city,
+        p.vehicle_type,
+        p.hour_of_day,
+        p.traffic_level,
+        p.weather_condition,
+        ROUND(AVG(p.ride_distance_km), 1)                                      AS ride_distance_km,
+        ROUND(AVG(p.surge_multiplier), 2)                                      AS surge_multiplier,
+        ROUND(AVG(p.predicted_fare), 2)                                        AS predicted_fare,
+        ROUND(AVG(p.cancel_probability) * 100, 1)                              AS cancel_probability_pct,
+        ROUND(AVG(p.cancel_probability), 4)                                    AS cancel_probability_raw,
+        CASE
+            WHEN AVG(p.cancel_probability) >= 0.70 THEN 'High'
+            WHEN AVG(p.cancel_probability) >= 0.40 THEN 'Medium'
+            ELSE 'Low'
+        END                                                                    AS cancel_risk_tier,
+        CASE
+            WHEN AVG(p.cancel_probability) >= 0.70 THEN 'Reassign Driver'
+            WHEN AVG(p.cancel_probability) >= 0.40 THEN 'Send Reminder'
+            ELSE 'Proceed'
+        END                                                                    AS recommended_action,
+        MAX(p.uc3_threshold_used)                                              AS uc3_threshold_used,
+        COUNT(*)                                                               AS matched_bookings
+    FROM predictions p
+    WHERE p.city              = :city
+      AND p.vehicle_type      = :vehicle_type
+      AND p.hour_of_day       = :hour_of_day
+      AND p.traffic_level     = :traffic_level
+      AND p.weather_condition = :weather_condition
+      AND ABS(p.ride_distance_km - :distance_km) <= 5.0
+    GROUP BY p.city, p.vehicle_type, p.hour_of_day,
+             p.traffic_level, p.weather_condition
+    LIMIT 1
+"""
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Q3  ANALYTICS PAGE
 # ─────────────────────────────────────────────────────────────────────────────
@@ -335,10 +376,10 @@ Q3_CANCEL_BY_PARTY = """
     SELECT
         CASE
             WHEN incomplete_ride_reason LIKE '%customer%'
-              OR incomplete_ride_reason LIKE '%Customer%'   THEN 'Customer'
+              OR incomplete_ride_reason LIKE '%Customer%'   THEN 'Customer No Show'
             WHEN incomplete_ride_reason LIKE '%driver%'
               OR incomplete_ride_reason LIKE '%Driver%'     THEN 'Driver'
-            WHEN booking_status = 'Cancelled'               THEN 'Customer (Assumed)'
+            WHEN booking_status = 'Cancelled'               THEN 'Cancelled By Customer (Assumed)'
             ELSE 'System / Unknown'
         END                                                                    AS cancelled_by,
         COUNT(*)                                                               AS count
@@ -497,38 +538,54 @@ Q4_RISK_BY_CITY_VEHICLE = """
     ORDER BY city, vehicle_type, FIELD(cancel_risk_tier, 'High', 'Medium', 'Low')
 """
 
-# 3. Reassignment candidates — high-risk bookings paired with best available
-#    replacement driver in the same city (performance_score >= 0.8)
+#3. Reassignment candidates — one best replacement driver per high-risk booking
+#   Uses ROW_NUMBER to pick only the top-scoring driver per booking_id
 Q4_REASSIGNMENT_CANDIDATES = """
+    WITH best_driver_per_city AS (
+        SELECT
+            driver_id,
+            driver_city,
+            ROUND(avg_driver_rating, 2)  AS driver_rating,
+            ROUND(acceptance_rate, 2)    AS acceptance_rate,
+            ROUND(
+                (avg_driver_rating * 0.4)
+              + (acceptance_rate   * 0.3)
+              + ((1 - delay_rate)  * 0.3), 3
+            )                            AS replacement_score
+        FROM drivers
+        WHERE ROUND(
+                (avg_driver_rating * 0.4)
+              + (acceptance_rate   * 0.3)
+              + ((1 - delay_rate)  * 0.3), 3
+              ) >= 0.8
+        ORDER BY replacement_score DESC
+        LIMIT 5
+    )
     SELECT
         p.booking_id,
         p.city,
         p.vehicle_type,
         p.hour_of_day,
-        ROUND(p.cancel_probability * 100, 1)                                   AS cancel_prob_pct,
+        ROUND(p.cancel_probability * 100, 1)  AS cancel_prob_pct,
         p.recommended_action,
-        ROUND(p.predicted_fare, 2)                                             AS predicted_fare,
-        d.driver_id                                                            AS best_replacement_driver,
+        ROUND(p.predicted_fare, 2)            AS predicted_fare,
+        d.driver_id                           AS best_replacement_driver,
         d.driver_city,
-        ROUND(d.avg_driver_rating, 2)                                          AS driver_rating,
-        ROUND(d.acceptance_rate, 2)                                            AS acceptance_rate,
-        ROUND(
-            (d.avg_driver_rating * 0.4)
-          + (d.acceptance_rate   * 0.3)
-          + ((1 - d.delay_rate)  * 0.3), 3
-        )                                                                      AS replacement_score
-    FROM predictions p
-    JOIN drivers d
+        d.driver_rating,
+        d.acceptance_rate,
+        d.replacement_score
+    FROM (
+        SELECT booking_id, city, vehicle_type, hour_of_day,
+               cancel_probability, recommended_action, predicted_fare
+        FROM predictions
+        WHERE cancel_risk_tier   = 'High'
+          AND recommended_action = 'Reassign Driver'
+        ORDER BY cancel_probability DESC
+        LIMIT 200
+    ) p
+    JOIN best_driver_per_city d
       ON d.driver_city = p.city
-    WHERE p.cancel_risk_tier = 'High'
-      AND p.recommended_action = 'Reassign Driver'
-      AND ROUND(
-            (d.avg_driver_rating * 0.4)
-          + (d.acceptance_rate   * 0.3)
-          + ((1 - d.delay_rate)  * 0.3), 3
-          ) >= 0.8
-    ORDER BY p.cancel_probability DESC, replacement_score DESC
-    LIMIT 200
+    ORDER BY p.cancel_probability DESC
 """
 
 # 4. Driver efficiency — completion rate vs total fare earned per driver
